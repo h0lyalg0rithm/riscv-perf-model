@@ -77,6 +77,7 @@ add_executable(olympia
   sim/OlympiaSim.cpp
   sim/main.cpp
   )
+
 target_link_libraries (olympia core mss ${Sparta_LIBS} ${STF_LINK_LIBS})
 if (CMAKE_BUILD_TYPE MATCHES "^[Rr]elease")
   target_link_options    (olympia PUBLIC -flto)
