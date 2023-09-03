@@ -1,0 +1,83 @@
+name: "Github CodeQL"
+
+on:
+  push:
+    branches:
+      - '*'
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ cpp ]
+        os: [ubuntu-latest]
+        BUILD_TYPE: [Debug,Release]
+
+    env:
+      OLYMPIA_BUILD_TYPE: ${{ matrix.BUILD_TYPE }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: recursive
+            #
+      # Get Sparta
+      - name: Checkout Sparta
+        uses: actions/checkout@v3
+        with:
+          repository: sparcians/map
+          path: map
+          ref: map_v2
+
+      # Setup Conda and build environment
+      - name: Grab Python v3.8
+        uses: actions/setup-python@v3
+        with:
+          python-version: 3.8
+
+      # Cache the conda dependencies to
+      - name: Cache conda deps
+        uses: actions/cache@v3
+        with:
+          key: ${{ matrix.os }}-${{ matrix.BUILD_TYPE }}-conda-${{ hashFiles('conda/environment.yml') }}
+          path: /usr/share/miniconda/envs/riscv_perf_model # Default path for conda
+
+      # Setup CCache to cache builds
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ matrix.os }}-${{ matrix.BUILD_TYPE }}-ccache-${{ github.ref_name }}
+          restore-keys: |
+            ${{ matrix.os }}-${{ matrix.BUILD_TYPE }}-ccache-master
+            ${{ matrix.os }}-${{ matrix.BUILD_TYPE }}-ccache
+
+      - name: Setup Conda Environment
+        run: |
+          # $CONDA is an environment variable pointing to the root of the miniconda directory
+          $CONDA/bin/conda config --set channel_priority strict
+          $CONDA/bin/conda env update --file  ${{ github.workspace }}/conda/environment.yml
+          $CONDA/bin/conda init bash
+
+      # Build
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v2
+        with:
+          languages: ${{ matrix.language }}
+          queries: +security-and-quality
+
+      - name: Build
+        run: ./.github/actions/build/build.sh
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v2
+        with:
+          category: "/language:${{ matrix.language }}"
