@@ -49,6 +49,10 @@ namespace olympia
 
             // Parameters for ldst_inst_queue
             PARAMETER(uint32_t, ldst_inst_queue_size, 8, "LSU ldst inst queue size")
+            PARAMETER(uint32_t, st_queue_size, ldst_inst_queue_size, "Store Queue size")
+            PARAMETER(uint32_t, ld_queue_size, ldst_inst_queue_size, "Load Queue size")
+            PARAMETER(uint32_t, replay_buffer_size, ldst_inst_queue_size, "Replay buffer size")
+            PARAMETER(uint32_t, replay_issue_delay, 3, "Replay Issue delay")
             // LSU microarchitecture parameters
             PARAMETER(bool, stall_pipeline_on_miss, false, "Stall pipeline on miss event")
             PARAMETER(bool, allow_speculative_load_exec, true, "Allow loads to proceed speculatively before all older store addresses are known")
@@ -61,16 +65,7 @@ namespace olympia
          */
         LSU(sparta::TreeNode* node, const LSUParameterSet* p);
 
-        ~LSU() {
-            DLOG(getContainer()->getLocation()
-                 << ": "
-                 << load_store_info_allocator.getNumAllocated()
-                 << " LoadStoreInstInfo objects allocated/created");
-            DLOG(getContainer()->getLocation()
-                 << ": "
-                 << memory_access_allocator.getNumAllocated()
-                 << " MemoryAccessInfo objects allocated/created");
-        }
+        ~LSU();
 
         //! name of this resource.
         static const char name[];
@@ -88,9 +83,11 @@ namespace olympia
 
         enum class PipelineStage
         {
-            MMU_LOOKUP = 0,     //1,
-            CACHE_LOOKUP = 1,   //3,
-            COMPLETE = 2,       //4
+            ADDRESS_CALCULATION = 0,
+            MMU_LOOKUP = 1,
+            CACHE_LOOKUP = 2,
+            CACHE_READ = 3,
+            COMPLETE = 4,
             NUM_STAGES
         };
 
@@ -124,6 +121,7 @@ namespace olympia
                 READY = 0,          // Ready to be issued
                 __FIRST = READY,
                 ISSUED,         // On the flight somewhere inside Load/Store Pipe
+                AWAITING_STORE,
                 NOT_READY,      // Not ready to be issued
                 NUM_STATES,
                 __LAST = NUM_STATES
@@ -133,7 +131,8 @@ namespace olympia
             LoadStoreInstInfo(const MemoryAccessInfoPtr & info_ptr) :
                 mem_access_info_ptr_(info_ptr),
                 rank_(IssuePriority::LOWEST),
-                state_(IssueState::NOT_READY)
+                state_(IssueState::NOT_READY),
+                dependentStore(nullptr)
                 {}
 
             // This Inst pointer will act as one of the two portals to the Inst class
@@ -172,6 +171,8 @@ namespace olympia
 
             bool isReady() const { return (getState() == IssueState::READY); }
 
+            bool isRetired() const { return (getInstPtr()->getStatus() == Inst::Status::RETIRED); }
+
             bool winArb(const LoadStoreInstInfoPtr & that) const
             {
                 if (that == nullptr) {
@@ -189,10 +190,19 @@ namespace olympia
                 state_ = IssueState::READY;
             }
 
+            void setDependentStore(const InstPtr &ldst_info_ptr) {
+                dependentStore = ldst_info_ptr;
+            }
+
+            InstPtr &getDependentStore() {
+                return dependentStore;
+            }
+
         private:
             MemoryAccessInfoPtr mem_access_info_ptr_;
             sparta::State<IssuePriority> rank_;
             sparta::State<IssueState> state_;
+            InstPtr dependentStore;
 
         };  // class LoadStoreInstInfo
 
@@ -228,7 +238,7 @@ namespace olympia
             {&unit_port_set_, "in_lsu_insts", 1};
 
         sparta::DataInPort<InstPtr> in_rob_retire_ack_
-            {&unit_port_set_, "in_rob_retire_ack", 1};
+            {&unit_port_set_, "in_rob_retire_ack", 0};
 
         sparta::DataInPort<FlushCriteria> in_reorder_flush_
             {&unit_port_set_, "in_reorder_flush", sparta::SchedulingPhase::Flush, 1};
@@ -273,6 +283,17 @@ namespace olympia
         LoadStoreIssueQueue ldst_inst_queue_;
         const uint32_t ldst_inst_queue_size_;
 
+        sparta::Buffer<LoadStoreInstInfoPtr> load_queue_;
+        const uint32_t load_queue_size_;
+
+        sparta::Buffer<LoadStoreInstInfoPtr> store_queue_;
+        const uint32_t store_queue_size_;
+
+        sparta::Buffer<LoadStoreInstInfoPtr> replay_buffer_;
+        const uint32_t replay_buffer_size_;
+
+        const uint32_t replay_issue_delay_;
+
         // MMU unit
         bool mmu_busy_ = false;
         bool mmu_pending_inst_flushed = false;
@@ -309,13 +330,18 @@ namespace olympia
         sparta::UniqueEvent<> uev_issue_inst_{&unit_event_set_, "issue_inst",
                 CREATE_SPARTA_HANDLER(LSU, issueInst_)};
 
+        sparta::PayloadEvent<InstPtr> uev_replay_ready_{&unit_event_set_, "replay_ready",
+                                              CREATE_SPARTA_HANDLER_WITH_DATA(LSU, replayReady_, InstPtr)};
+
         sparta::UniqueEvent<> uev_pipe_stall_{&unit_event_set_, "pipe_stall",
-                CREATE_SPARTA_HANDLER(LSU, pipeStall_)};
+                                              CREATE_SPARTA_HANDLER(LSU, pipeStall_)};
+
 
         ////////////////////////////////////////////////////////////////////////////////
         // Callbacks
         ////////////////////////////////////////////////////////////////////////////////
 
+        void replayReady_(const InstPtr &);
         // Send initial credits (ldst_inst_queue_size_) to Dispatch Unit
         void sendInitialCredits_();
 
@@ -331,7 +357,7 @@ namespace olympia
         // Issue/Re-issue ready instructions in the issue queue
         void issueInst_();
 
-
+        void handleAddressCalculation_();
         // Handle MMU access request
         void handleMMULookupReq_();
         void handleMMUReadyReq_(const MemoryAccessInfoPtr &memory_access_info_ptr);
@@ -341,6 +367,8 @@ namespace olympia
         void handleCacheLookupReq_();
         void handleCacheReadyReq_(const MemoryAccessInfoPtr &memory_access_info_ptr);
         void getAckFromCache_(const MemoryAccessInfoPtr &updated_memory_access_info_ptr);
+
+        void handleCacheRead_();
 
         // Retire load/store instruction
         void completeInst_();
@@ -354,11 +382,57 @@ namespace olympia
         // Regular Function/Subroutine Call
         ////////////////////////////////////////////////////////////////////////////////
 
+        void setMatchingStoreQueueAddress(const MemoryAccessInfoPtr &);
+
+        void updateInstDependentInstruction(const InstPtr &org_inst, const InstPtr &dep_inst);
+
+        const LoadStoreInstInfoPtr &getYoungestOlderInstruction(const InstPtr &inst_ptr);
+
+        void updateIssueStateDependentLoad(const InstPtr &inst_ptr);
+
+        void updateIssuePriorityAwaitingLoad(const InstPtr &inst_ptr);
+
+        bool instInQueue(LoadStoreIssueQueue &queue,const InstPtr &inst_ptr);
+
+        bool instPresentInQueues(const InstPtr &inst_ptr);
+
+        LoadStoreInstInfoPtr createLoadStoreInst(const InstPtr &inst_ptr);
+
+        bool allOlderStoresIssued(const InstPtr &inst_ptr);
+
+        bool olderStoresIssued(LoadStoreIssueQueue &queue, const InstPtr &inst_ptr);
+
+        void allocateInstToQueues(const InstPtr &inst_ptr);
+
+        void deallocateYoungerLoadFromQueue(LoadStoreIssueQueue & queue, const InstPtr &inst_ptr);
         // Append new load/store instruction into issue queue
         void appendIssueQueue_(const LoadStoreInstInfoPtr &);
 
+        // Append new load instruction into load queue
+        void appendLoadQueue_(const LoadStoreInstInfoPtr &);
+
+        // Append new store instruction into store queue
+        void appendStoreQueue_(const LoadStoreInstInfoPtr &);
+
+        // Append new store instruction into store queue
+        void appendToQueue_(const LoadStoreInstInfoPtr &, LoadStoreIssueQueue &);
+
+        void popReplayBuffer_(const LoadStoreInstInfoPtr &);
+        // Pop completed load instruction out of load queue
+        void popLoadQueue_(const LoadStoreInstInfoPtr &);
+
+        // Pop completed store instruction out of store queue
+        void popStoreQueue_(const LoadStoreInstInfoPtr &);
+
         // Pop completed store instruction out of issue queue
         void popIssueQueue_(const LoadStoreInstInfoPtr &);
+
+        // Pop completed load/store instruction out of issue queue
+        void removeFromQueue_(const LoadStoreInstInfoPtr &, LoadStoreIssueQueue &);
+
+        const LoadStoreInstInfoPtr & newArbitrateInstIssue_();
+
+        const LoadStoreInstInfoPtr & stallArbitrateInstIssue_();
 
         // Arbitrate instruction issue from ldst_inst_queue
         const LoadStoreInstInfoPtr & arbitrateInstIssue_();
@@ -379,6 +453,9 @@ namespace olympia
 
         // Update issue priority after store instruction retires
         void updateIssuePriorityAfterStoreInstRetire_(const InstPtr &);
+
+        void inline printQueueSizes() const;
+        void updateInstReplayReady(const InstPtr &);
 
         // Flush instruction issue queue
         template<typename Comp>
@@ -417,6 +494,8 @@ namespace olympia
 
         friend class LSUTester;
 
+        void abortYoungerLoads(const MemoryAccessInfoPtr & memory_access_info_ptr);
+        void invalidatePipeline(const InstPtr & inst_ptr);
     };
 
     inline std::ostream & operator<<(std::ostream & os,
@@ -494,6 +573,9 @@ namespace olympia
                 break;
             case LSU::LoadStoreInstInfo::IssueState::ISSUED:
                 os << "(issued)";
+                break;
+            case LSU::LoadStoreInstInfo::IssueState::AWAITING_STORE:
+                os << "(awaiting_store)";
                 break;
             case LSU::LoadStoreInstInfo::IssueState::NOT_READY:
                 os << "(not_ready)";

@@ -64,7 +64,7 @@ namespace olympia {
                 {&unit_port_set_, "out_lsu_lookup_ack", 0};
 
         sparta::DataOutPort<MemoryAccessInfoPtr> out_lsu_lookup_req_
-                {&unit_port_set_, "out_lsu_lookup_req", 1};
+                {&unit_port_set_, "out_lsu_lookup_req", 0};
 
         sparta::DataOutPort<InstPtr> out_biu_req_
                 {&unit_port_set_, "out_biu_req"};

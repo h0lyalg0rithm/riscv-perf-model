@@ -110,8 +110,8 @@ namespace olympia
             {
                 // UPDATE:
                 ex_inst.setStatus(Inst::Status::RETIRED);
-                if (ex_inst.isStoreInst()) {
-                    out_rob_retire_ack_.send(ex_inst_ptr);
+                if (ex_inst.isLoadStoreInst()) {
+                    out_rob_retire_ack_.send(ex_inst_ptr, 0);
                 }
                 // sending retired instruction to rename
                 out_rob_retire_ack_rename_.send(ex_inst_ptr);

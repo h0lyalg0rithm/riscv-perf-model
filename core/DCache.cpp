@@ -72,6 +72,7 @@ namespace olympia {
     // Handle Lookup request from the LSU
     void DCache::getInstsFromLSU_(const MemoryAccessInfoPtr &memory_access_info_ptr){
         const bool hit = dataLookup_(memory_access_info_ptr);
+        ILOG("Lookup hit " << hit);
         if(hit){
             memory_access_info_ptr->setCacheState(MemoryAccessInfo::CacheState::HIT);
             memory_access_info_ptr->setDataIsReady(true);
@@ -89,10 +90,11 @@ namespace olympia {
 
     // Send ready signal to the LSU
     void DCache::getAckFromBIU_(const InstPtr &inst_ptr) {
-        busy_ = false;
-        reloadCache_(inst_ptr->getRAdr());
+        ILOG("Got " << inst_ptr << " from BIU")
         out_lsu_lookup_req_.send(cache_pending_inst_);
+        reloadCache_(inst_ptr->getRAdr());
         cache_pending_inst_.reset();
+        busy_ = false;
     }
 
 }

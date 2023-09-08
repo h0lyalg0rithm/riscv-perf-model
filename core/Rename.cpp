@@ -117,7 +117,7 @@ namespace olympia
     void Rename::getAckFromROB_(const InstPtr & inst_ptr)
     {
         sparta_assert(inst_ptr->getStatus() == Inst::Status::RETIRED,
-                        "Get ROB Ack, but the inst hasn't retired yet!");
+                        "Get ROB Ack, but the inst hasn't retired yet! " << inst_ptr);
         auto const & dests = inst_ptr->getDestOpInfoList();
         if(dests.size() > 0)
         {
