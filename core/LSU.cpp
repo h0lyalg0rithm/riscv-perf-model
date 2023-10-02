@@ -131,6 +131,11 @@ namespace olympia
 
     // Receive new load/store instruction from Dispatch Unit
     void LSU::getInstsFromDispatch_(const InstPtr &inst_ptr) {
+//        sparta_assert(inst_ptr->getStatus() != Inst::Status::RETIRED, "Why is retired instruction here " << inst_ptr);
+        if(inst_ptr->getStatus() == Inst::Status::RETIRED){
+            return;
+        }
+
         // Add to queue if its new instruction
         if (!instPresentInQueues(inst_ptr))
         {
@@ -173,13 +178,12 @@ namespace olympia
             }else if (false == allow_speculative_load_exec_){
                 // Load instruction is ready is when both address and older stores addresses are known
                 all_ready = allOlderStoresIssued(inst_ptr);
-//                if (all_ready)
-//                {
-//                    auto &store_ptr = getYoungestOlderInstruction(inst_ptr);
-//                    updateInstDependentInstruction(inst_ptr, store_ptr->getInstPtr());
-//                    updateIssuePriorityAwaitingLoad(inst_ptr);
-//                }
-                ILOG("Load instruction " << inst_ptr << " is ready to be scheduled");
+                if(all_ready)
+                {
+                    ILOG("Load instruction " << inst_ptr << " is ready to be scheduled");
+                }else{
+                    ILOG("Load instruction not dispatched " << inst_ptr);
+                }
             }
         }
 
@@ -216,7 +220,7 @@ namespace olympia
     void LSU::getAckFromROB_(const InstPtr & inst_ptr)
     {
         sparta_assert(inst_ptr->getStatus() == Inst::Status::RETIRED,
-                      "Get ROB Ack, but the store inst hasn't retired yet!");
+                      "Get ROB Ack, but the store inst hasn't retired yet! " << inst_ptr);
 
         if(inst_ptr->isStoreInst())
             ++stores_retired_;
@@ -256,7 +260,7 @@ namespace olympia
         }
 
         const auto &win_ptr = arbitrated_inst_ptr;
-        ILOG("Returned");
+        ILOG("Returned " << win_ptr);
         ILOG("Arbitrate inst "<< win_ptr->getInstPtr());
 
         // NOTE:
@@ -303,6 +307,22 @@ namespace olympia
             if (inst_ptr->isStoreInst())
             {
                 mem_info_ptr->setDataIsReady(true);
+                for(auto &ld_inst: ldst_inst_queue_){
+                    auto &o_inst = ld_inst->getInstPtr();
+                    if(o_inst->isStoreInst() || o_inst->getTargetVAddr() != inst_ptr->getTargetVAddr())
+                    {
+                        return;
+                    }
+                    if(o_inst->getStatus() == Inst::Status::DISPATCHED){
+                        updateIssuePriorityAfterNewDispatch_(ld_inst->getInstPtr());
+                        inst_ptr->setStatus(Inst::Status::SCHEDULED);
+                        if(isReadyToIssueInsts_() && !ldst_pipeline_.isStalledOrStalling())
+                        {
+                            uev_issue_inst_.schedule(sparta::Clock::Cycle(0));
+                            ILOG("Another issue event scheduled " << inst_ptr);
+                        }
+                    }
+                }
             }
             if (!stall_pipeline_on_miss_ && isReadyToIssueInsts_())
             {
@@ -395,11 +415,6 @@ namespace olympia
                 ldst_pipeline_.invalidateStage(stage_id);
             }
         }
-//        else if(updated_memory_access_info_ptr->getInstPtr()->isStoreInst()){
-//            //updateIssueStateDependentLoad(updated_memory_access_info_ptr->getInstPtr());
-//        }else if(!updated_memory_access_info_ptr->getInstPtr()->isStoreInst()){
-//            //            setMatchingStoreQueueAddress(updated_memory_access_info_ptr);
-//        }
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -586,13 +601,13 @@ namespace olympia
                 {
                     ILOG("Removed issue queue"  << inst_ptr);
                     popIssueQueue_(load_store_info_ptr);
+                    out_lsu_credits_.send(1, 0);
                 }
 
                 if(instInQueue(load_queue_, inst_ptr))
                 {
                     ILOG("Removed load " << inst_ptr);
                     popLoadQueue_(load_store_info_ptr);
-                    out_lsu_credits_.send(1, 0);
                 }
 //                 Update instruction issue queue credits to Dispatch Unit
                 if(isReadyToIssueInsts_() && !ldst_pipeline_.isStalledOrStalling())
@@ -611,13 +626,16 @@ namespace olympia
             printQueueSizes();
 
             if(isReadyToIssueInsts_() && !ldst_pipeline_.isStalledOrStalling())
-                uev_issue_inst_.schedule(sparta::Clock::Cycle(0));
+            uev_issue_inst_.schedule(sparta::Clock::Cycle(0));
 
 
             ILOG("Complete Load Instruction: "
                  << inst_ptr->getMnemonic()
                  << " uid(" << inst_ptr->getUniqueID() << ")");
 
+            for(auto &ld_inst_: ldst_inst_queue_){
+                ILOG("Queue " << ld_inst_ << " " << ld_inst_->isReady() << " " << ld_inst_->getInstPtr());
+            }
             return;
         }
 
@@ -649,6 +667,7 @@ namespace olympia
             if(instInQueue(ldst_inst_queue_, inst_ptr))
             {
                 ILOG("Removed issue queue"  << inst_ptr);
+                out_lsu_credits_.send(1, 0);
                 popIssueQueue_(load_store_info_ptr);
             }
 
@@ -661,7 +680,6 @@ namespace olympia
             if(instInQueue(store_queue_, load_store_info_ptr->getInstPtr()))
             {
                 ILOG("Removed store " << load_store_info_ptr);
-                out_lsu_credits_.send(1, 0);
                 popStoreQueue_(load_store_info_ptr);
             }
 
@@ -710,6 +728,8 @@ namespace olympia
 
         // Flush instruction issue queue
         flushIssueQueue_(flush);
+
+        flushReplayQueue_(flush);
 
         // Cancel issue event already scheduled if no ready-to-issue inst left after flush
         if (!isReadyToIssueInsts_()) {
@@ -816,9 +836,13 @@ namespace olympia
             if (!(*iter)->isReady()) {
                 continue;
             }
-            if (!(*win_ptr_iter)->isReady() || (*iter)->winArb(*win_ptr_iter)) {
+            if ((*win_ptr_iter)->isRetired() || !(*win_ptr_iter)->isReady() || (*iter)->winArb(*win_ptr_iter)) {
                 win_ptr_iter = iter;
             }
+
+//            if((*iter)->getInstUniqueID() > (*win_ptr_iter)->getInstUniqueID()){
+//                win_ptr_iter = iter;
+//            }
         }
         return *win_ptr_iter;
     }
@@ -844,7 +868,7 @@ namespace olympia
             if (!(*iter)->isReady()) {
                 continue;
             }
-            if((*iter)->getInstUniqueID() < (*win_ptr_iter)->getInstUniqueID()){
+            if((*win_ptr_iter)->isRetired() || (*iter)->getInstUniqueID() < (*win_ptr_iter)->getInstUniqueID()){
                 win_ptr_iter = iter;
             }
         }
@@ -913,7 +937,7 @@ namespace olympia
 
         // Check if there is at least one ready-to-issue instruction in replay queue
         for (auto const &inst_info_ptr : replay_buffer_) {
-            if (inst_info_ptr->isReady()) {
+            if (inst_info_ptr->isReady() || inst_info_ptr->isRetired()) {
                 ILOG("At least one instruction in replay queue is ready to be issued: " << inst_info_ptr);
                 return true;
             }
@@ -921,7 +945,7 @@ namespace olympia
 
         // Check if there is at least one ready-to-issue instruction in issue queue
         for (auto const &inst_info_ptr : ldst_inst_queue_) {
-            if (inst_info_ptr->isReady()) {
+            if (inst_info_ptr->isReady() || inst_info_ptr->isRetired()) {
                 ILOG("At least one instruction in instruction queue is ready to be issued: " << inst_info_ptr);
                 return true;
             }
@@ -936,33 +960,6 @@ namespace olympia
     void LSU::updateIssuePriorityAfterNewDispatch_(const InstPtr & inst_ptr)
     {
         for (auto &inst_info_ptr : ldst_inst_queue_) {
-            if (inst_info_ptr->getInstPtr() == inst_ptr) {
-
-                inst_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-                inst_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::NEW_DISP);
-
-                return;
-            }
-        }
-        for (auto &inst_info_ptr : load_queue_) {
-            if (inst_info_ptr->getInstPtr() == inst_ptr) {
-
-                inst_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-                inst_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::NEW_DISP);
-
-                return;
-            }
-        }
-        for (auto &inst_info_ptr : store_queue_) {
-            if (inst_info_ptr->getInstPtr() == inst_ptr) {
-
-                inst_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-                inst_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::NEW_DISP);
-
-                return;
-            }
-        }
-        for (auto &inst_info_ptr : replay_buffer_) {
             if (inst_info_ptr->getInstPtr() == inst_ptr) {
 
                 inst_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
@@ -1009,87 +1006,6 @@ namespace olympia
             }
         }
 
-        for (auto &inst_info_ptr : load_queue_) {
-            const MemoryAccessInfoPtr & mem_info_ptr = inst_info_ptr->getMemoryAccessInfoPtr();
-
-            if (mem_info_ptr->getMMUState() == MemoryAccessInfo::MMUState::MISS) {
-                // Re-activate all TLB-miss-pending instructions in the issue queue
-                inst_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-                inst_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::MMU_PENDING);
-
-                // NOTE:
-                // We may not have to re-activate all of the pending MMU miss instruction here
-                // However, re-activation must be scheduled somewhere else
-
-                if (inst_info_ptr->getInstPtr() == inst_ptr) {
-                    // Update issue priority for this outstanding TLB miss
-                    inst_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-                    inst_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::MMU_RELOAD);
-
-                    // NOTE:
-                    // The priority should be set in such a way that
-                    // the outstanding miss is always re-issued earlier than other pending miss
-                    // Here we have MMU_RELOAD > MMU_PENDING
-
-                    is_found = true;
-                }
-            }
-        }
-
-        for (auto &inst_info_ptr : store_queue_) {
-            const MemoryAccessInfoPtr & mem_info_ptr = inst_info_ptr->getMemoryAccessInfoPtr();
-
-            if (mem_info_ptr->getMMUState() == MemoryAccessInfo::MMUState::MISS) {
-                // Re-activate all TLB-miss-pending instructions in the issue queue
-                inst_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-                inst_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::MMU_PENDING);
-
-                // NOTE:
-                // We may not have to re-activate all of the pending MMU miss instruction here
-                // However, re-activation must be scheduled somewhere else
-
-                if (inst_info_ptr->getInstPtr() == inst_ptr) {
-                    // Update issue priority for this outstanding TLB miss
-                    inst_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-                    inst_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::MMU_RELOAD);
-
-                    // NOTE:
-                    // The priority should be set in such a way that
-                    // the outstanding miss is always re-issued earlier than other pending miss
-                    // Here we have MMU_RELOAD > MMU_PENDING
-
-                    is_found = true;
-                }
-            }
-        }
-
-//        for (auto &inst_info_ptr : replay_buffer_) {
-//            const MemoryAccessInfoPtr & mem_info_ptr = inst_info_ptr->getMemoryAccessInfoPtr();
-//
-//            if (mem_info_ptr->getMMUState() == MemoryAccessInfo::MMUState::MISS) {
-//                // Re-activate all TLB-miss-pending instructions in the issue queue
-//                inst_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-//                inst_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::MMU_PENDING);
-//
-//                // NOTE:
-//                // We may not have to re-activate all of the pending MMU miss instruction here
-//                // However, re-activation must be scheduled somewhere else
-//
-//                if (inst_info_ptr->getInstPtr() == inst_ptr) {
-//                    // Update issue priority for this outstanding TLB miss
-//                    inst_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-//                    inst_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::MMU_RELOAD);
-//
-//                    // NOTE:
-//                    // The priority should be set in such a way that
-//                    // the outstanding miss is always re-issued earlier than other pending miss
-//                    // Here we have MMU_RELOAD > MMU_PENDING
-//
-//                    is_found = true;
-//                }
-//            }
-//        }
-
         sparta_assert(is_flushed_inst || is_found,
             "Attempt to rehandle TLB lookup for instruction not yet in the issue queue!");
     }
@@ -1101,86 +1017,6 @@ namespace olympia
         bool is_found = false;
 
         for (auto &inst_info_ptr : ldst_inst_queue_) {
-            const MemoryAccessInfoPtr & mem_info_ptr = inst_info_ptr->getMemoryAccessInfoPtr();
-
-            if (mem_info_ptr->getCacheState() == MemoryAccessInfo::CacheState::MISS) {
-                // Re-activate all cache-miss-pending instructions in the issue queue
-                inst_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-                inst_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::CACHE_PENDING);
-
-            }
-
-            // NOTE:
-            // We may not have to re-activate all of the pending cache miss instruction here
-            // However, re-activation must be scheduled somewhere else
-
-            if (inst_info_ptr->getInstPtr() == inst_ptr) {
-                // Update issue priority for this outstanding cache miss
-                inst_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-                inst_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::CACHE_RELOAD);
-
-                // NOTE:
-                // The priority should be set in such a way that
-                // the outstanding miss is always re-issued earlier than other pending miss
-                // Here we have CACHE_RELOAD > CACHE_PENDING > MMU_RELOAD
-
-                is_found = true;
-            }
-        }
-        for (auto &inst_info_ptr : load_queue_) {
-            const MemoryAccessInfoPtr & mem_info_ptr = inst_info_ptr->getMemoryAccessInfoPtr();
-
-            if (mem_info_ptr->getCacheState() == MemoryAccessInfo::CacheState::MISS) {
-                // Re-activate all cache-miss-pending instructions in the issue queue
-                inst_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-                inst_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::CACHE_PENDING);
-
-            }
-
-            // NOTE:
-            // We may not have to re-activate all of the pending cache miss instruction here
-            // However, re-activation must be scheduled somewhere else
-
-            if (inst_info_ptr->getInstPtr() == inst_ptr) {
-                // Update issue priority for this outstanding cache miss
-                inst_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-                inst_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::CACHE_RELOAD);
-
-                // NOTE:
-                // The priority should be set in such a way that
-                // the outstanding miss is always re-issued earlier than other pending miss
-                // Here we have CACHE_RELOAD > CACHE_PENDING > MMU_RELOAD
-
-                is_found = true;
-            }
-        }
-        for (auto &inst_info_ptr : store_queue_) {
-            const MemoryAccessInfoPtr & mem_info_ptr = inst_info_ptr->getMemoryAccessInfoPtr();
-
-            if (mem_info_ptr->getCacheState() == MemoryAccessInfo::CacheState::MISS) {
-                // Re-activate all cache-miss-pending instructions in the issue queue
-                inst_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-                inst_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::CACHE_PENDING);
-
-            }
-            // NOTE:
-            // We may not have to re-activate all of the pending cache miss instruction here
-            // However, re-activation must be scheduled somewhere else
-
-            if (inst_info_ptr->getInstPtr() == inst_ptr) {
-                // Update issue priority for this outstanding cache miss
-                inst_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-                inst_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::CACHE_RELOAD);
-
-                // NOTE:
-                // The priority should be set in such a way that
-                // the outstanding miss is always re-issued earlier than other pending miss
-                // Here we have CACHE_RELOAD > CACHE_PENDING > MMU_RELOAD
-
-                is_found = true;
-            }
-        }
-        for (auto &inst_info_ptr : replay_buffer_) {
             const MemoryAccessInfoPtr & mem_info_ptr = inst_info_ptr->getMemoryAccessInfoPtr();
 
             if (mem_info_ptr->getCacheState() == MemoryAccessInfo::CacheState::MISS) {
@@ -1224,27 +1060,6 @@ namespace olympia
                 return;
             }
         }
-
-        for (auto &inst_info_ptr : store_queue_) {
-            if (inst_info_ptr->getInstPtr() == inst_ptr) {
-
-                inst_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-                inst_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::CACHE_PENDING);
-
-                return;
-            }
-        }
-
-        for (auto &inst_info_ptr : load_queue_) {
-            if (inst_info_ptr->getInstPtr() == inst_ptr) {
-
-                inst_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-                inst_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::HIGHEST);
-
-                return;
-            }
-        }
-
         sparta_assert(false,
             "Attempt to update issue priority for instruction not yet in the issue queue! " << inst_ptr);
 
@@ -1277,11 +1092,6 @@ namespace olympia
     void LSU::allocateInstToQueues(const InstPtr &inst_ptr) {
         auto inst_info_ptr = createLoadStoreInst(inst_ptr);
         appendIssueQueue_(inst_info_ptr);
-        if(inst_ptr->isStoreInst()){
-            appendStoreQueue_(inst_info_ptr);
-        }else if(allow_speculative_load_exec_){
-            appendLoadQueue_(inst_info_ptr);
-        }
     }
 
     LSU::LoadStoreInstInfoPtr LSU::createLoadStoreInst(const InstPtr &inst_ptr){
@@ -1320,20 +1130,6 @@ namespace olympia
         return olderStoresIssued(store_queue_, inst_ptr);
     }
 
-    const LSU::LoadStoreInstInfoPtr &LSU::getYoungestOlderInstruction(const InstPtr &inst_ptr) {
-        auto youngest_inst = store_queue_.begin();
-        for (auto ldst_info_ptr = store_queue_.begin(); ldst_info_ptr != store_queue_.end(); ldst_info_ptr++) {
-            const auto &ldst_inst_ptr = (*ldst_info_ptr)->getInstPtr();
-            if(ldst_inst_ptr->isStoreInst() &&
-                ldst_inst_ptr->getUniqueID() < inst_ptr->getUniqueID()){
-                if((*youngest_inst)->getInstUniqueID() < ldst_inst_ptr->getUniqueID()){
-                    youngest_inst = ldst_info_ptr;
-                }
-            }
-        }
-        return *youngest_inst;
-    }
-
     bool LSU::olderStoresIssued(LSU::LoadStoreIssueQueue &queue, const InstPtr &inst_ptr) {
         for(const auto &ldst_info_ptr: queue){
             const auto &ldst_inst_ptr = ldst_info_ptr->getInstPtr();
@@ -1347,33 +1143,7 @@ namespace olympia
         }
         return true;
     }
-    void LSU::updateIssuePriorityAwaitingLoad(const InstPtr &inst_ptr) {
-        for (auto &inst_info_ptr : ldst_inst_queue_) {
-            if (inst_info_ptr->getInstPtr() == inst_ptr) {
 
-                inst_info_ptr->setState(LoadStoreInstInfo::IssueState::AWAITING_STORE);
-
-                return;
-            }
-        }
-    }
-    void LSU::updateIssueStateDependentLoad(const InstPtr &inst_ptr) {
-        for(const auto &ldst_inst_ptr : ldst_inst_queue_){
-            if(ldst_inst_ptr->getState() == LoadStoreInstInfo::IssueState::AWAITING_STORE && ldst_inst_ptr->getDependentStore() == inst_ptr){
-                ldst_inst_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-            }
-        }
-    }
-
-    void LSU::updateInstDependentInstruction(const InstPtr &org_inst,
-                                             const InstPtr &dep_inst) {
-        for(const auto &ldst_inst_ptr : ldst_inst_queue_){
-            if(ldst_inst_ptr->getInstPtr() == org_inst){
-                ldst_inst_ptr->setDependentStore(dep_inst);
-                return;
-            }
-        }
-    }
     void LSU::updateInstReplayReady(const InstPtr & inst_ptr){
         for(auto load_store_info_ptr: replay_buffer_)
         {
@@ -1388,12 +1158,12 @@ namespace olympia
 
     void LSU::replayReady_(const InstPtr &inst_ptr){
         ILOG("Replay inst ready " << inst_ptr);
-        for(auto load_store_info_ptr: replay_buffer_)
+        for(auto &load_store_info_ptr: ldst_inst_queue_)
         {
             if (load_store_info_ptr->getInstPtr() == inst_ptr)
             {
                 load_store_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
-                load_store_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::HIGHEST);
+                load_store_info_ptr->setPriority(LoadStoreInstInfo::IssuePriority::NEW_DISP);
             }
         }
 //        if(isReadyToIssueInsts_())
@@ -1422,6 +1192,36 @@ namespace olympia
 
             if (flush(inst_id)) {
                 ldst_inst_queue_.erase(delete_iter);
+
+                // NOTE:
+                // We cannot increment iter after erase because it's already invalidated by then
+
+                ++credits_to_send;
+
+                ILOG("Flush Instruction ID: " << inst_id);
+            }
+        }
+
+        if (credits_to_send > 0) {
+            out_lsu_credits_.send(credits_to_send);
+
+            ILOG("Flush " << credits_to_send << " instructions in issue queue!");
+        }
+    }
+
+    template<typename Comp>
+    void LSU::flushReplayQueue_(const Comp & flush)
+    {
+        uint32_t credits_to_send = 0;
+
+        auto iter = replay_buffer_.begin();
+        while (iter != replay_buffer_.end()) {
+            auto inst_id = (*iter)->getInstPtr()->getUniqueID();
+
+            auto delete_iter = iter++;
+
+            if (flush(inst_id)) {
+                replay_buffer_.erase(delete_iter);
 
                 // NOTE:
                 // We cannot increment iter after erase because it's already invalidated by then
@@ -1470,11 +1270,9 @@ namespace olympia
              << memory_access_allocator.getNumAllocated()
              << " MemoryAccessInfo objects allocated/created");
         ILOG("LSU is destructing now");
-//        printQueueSizes();
-//        sparta_assert(ldst_inst_queue_.empty(), "Issue queue is not empty!!!");
-//        sparta_assert(load_queue_.empty(), "Load queue is not empty!!!");
-//        sparta_assert(store_queue_.empty(), "Store queue is not empty!!!");
-//        sparta_assert(replay_buffer_.empty(), "Replay queue is not empty!!!");
+        for(auto &ld_inst_: ldst_inst_queue_){
+            ILOG("Queue " << ld_inst_ << " " << ld_inst_->isReady() << " " << ld_inst_->getInstPtr());
+        }
     }
 
     void LSU::abortYoungerLoads(const MemoryAccessInfoPtr & memory_access_info_ptr)

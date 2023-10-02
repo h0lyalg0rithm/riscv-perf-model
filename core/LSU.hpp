@@ -238,7 +238,7 @@ namespace olympia
             {&unit_port_set_, "in_lsu_insts", 1};
 
         sparta::DataInPort<InstPtr> in_rob_retire_ack_
-            {&unit_port_set_, "in_rob_retire_ack", 0};
+            {&unit_port_set_, "in_rob_retire_ack", 1};
 
         sparta::DataInPort<FlushCriteria> in_reorder_flush_
             {&unit_port_set_, "in_reorder_flush", sparta::SchedulingPhase::Flush, 1};
@@ -460,6 +460,9 @@ namespace olympia
         // Flush instruction issue queue
         template<typename Comp>
         void flushIssueQueue_(const Comp &);
+
+        template<typename Comp>
+        void flushReplayQueue_(const Comp &);
 
         // Flush load/store pipeline
         template<typename Comp>
