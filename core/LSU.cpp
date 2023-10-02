@@ -131,10 +131,10 @@ namespace olympia
 
     // Receive new load/store instruction from Dispatch Unit
     void LSU::getInstsFromDispatch_(const InstPtr &inst_ptr) {
-//        sparta_assert(inst_ptr->getStatus() != Inst::Status::RETIRED, "Why is retired instruction here " << inst_ptr);
-        if(inst_ptr->getStatus() == Inst::Status::RETIRED){
-            return;
-        }
+        sparta_assert(inst_ptr->getStatus() != Inst::Status::RETIRED, "Why is retired instruction here " << inst_ptr);
+//        if(inst_ptr->getStatus() == Inst::Status::RETIRED){
+//            return;
+//        }
 
         // Add to queue if its new instruction
         if (!instPresentInQueues(inst_ptr))
