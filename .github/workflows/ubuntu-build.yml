@@ -1,7 +1,7 @@
 on:
-  pull_request:
+  push:
     branches:
-      - master
+      - '*'
 
 env:
   CACHE_VERSION: v1
@@ -12,7 +12,7 @@ jobs:
     strategy:
       # Strategy is a matrix of debug and release builds/regression
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, macos-latest]
         BUILD_TYPE: [Debug,Release]
 
     name: Ubuntu-${{ matrix.BUILD_TYPE }}
