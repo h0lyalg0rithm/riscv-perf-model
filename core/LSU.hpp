@@ -79,7 +79,7 @@ namespace olympia
         // Type Name/Alias Declaration
         ////////////////////////////////////////////////////////////////////////////////
 
-
+        bool retire_done_and_is_drained_ = false;
         class LoadStoreInstInfo;
 
         using LoadStoreInstInfoPtr = sparta::SpartaSharedPointer<LoadStoreInstInfo>;
@@ -221,6 +221,8 @@ namespace olympia
                                   SPARTA_ADDPAIR("state", &LoadStoreInstInfo::getState),
                                   SPARTA_FLATTEN(         &LoadStoreInstInfo::getMemoryAccessInfoPtr))
         };
+
+        void onRobDrained_(const bool &val);
     private:
 
         using ScoreboardViews = std::array<std::unique_ptr<sparta::ScoreboardView>, core_types::N_REGFILES>;
@@ -331,7 +333,6 @@ namespace olympia
         ////////////////////////////////////////////////////////////////////////////////
         // Callbacks
         ////////////////////////////////////////////////////////////////////////////////
-
         // Send initial credits (ldst_inst_queue_size_) to Dispatch Unit
         void sendInitialCredits_();
 
@@ -375,6 +376,9 @@ namespace olympia
 
         // Mark instruction as not ready and schedule replay ready
         void updateInstReplayReady_(const LoadStoreInstInfoPtr &);
+
+
+        void dumpDebugContent_(std::ostream& output) const override final;
 
         ////////////////////////////////////////////////////////////////////////////////
         // Regular Function/Subroutine Call
