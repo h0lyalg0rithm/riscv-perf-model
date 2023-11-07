@@ -501,7 +501,13 @@ namespace olympia
             {
                 updateInstReplayReady_(load_store_info_ptr);
             }
-            load_store_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
+            // There might not be a wake up because the cache cannot handle nay more insutrction
+             // Change to nack wakeup when implemented
+            if(!load_store_info_ptr->isInReadyQueue())
+            {
+                appendToReadyQueue_(load_store_info_ptr);
+                load_store_info_ptr->setState(LoadStoreInstInfo::IssueState::READY);
+            }
             ldst_pipeline_.invalidateStage(cache_read_stage_);
             return;
         }
@@ -791,8 +797,8 @@ namespace olympia
 
         if (found && isReadyToIssueInsts_())
         {
-            ILOG("Ready dep inst ");
-            uev_issue_inst_.schedule(sparta::Clock::Cycle(1));
+            ILOG("Ready dep inst issue ");
+            uev_issue_inst_.schedule(sparta::Clock::Cycle(0));
         }
     }
 
@@ -905,7 +911,6 @@ namespace olympia
     }
 
     void LSU::appendToReplayQueue_(const LoadStoreInstInfoPtr &inst_info_ptr){
-//        return;
         sparta_assert(replay_buffer_.size() < replay_buffer_size_,
                       "Appending load queue causes overflows!");
 
